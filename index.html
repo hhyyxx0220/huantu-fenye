@@ -1,0 +1,1074 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>幻途分野 - 虚实二界平台闯关</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#0b0a10;overflow:hidden;
+    display:flex;align-items:center;justify-content:center;}
+  canvas{width:min(100vw,177.78vh);height:min(56.25vw,100vh);
+    box-shadow:0 0 80px rgba(123,92,255,.18), 0 0 30px rgba(0,0,0,.6);
+    outline:none;}
+</style>
+</head>
+<body>
+<canvas id="game" width="3840" height="2160"></canvas>
+<script>
+"use strict";
+/* ==================================================================
+ * 《幻途分野》 —— 2D 横版平台闯关 · 虚实二界切换
+ * 单文件实现：HTML5 Canvas + 原生 JavaScript，无任何外部资源
+ * 代码分区：常量配置 / 关卡数据 / 地图解析 / 输入系统 /
+ *          物理与碰撞 / 世界切换 / 实体更新 / 渲染 / 状态机 / 主循环
+ * ================================================================== */
+
+/* ============================ 一、常量配置 ============================ */
+const TILE = 32;                 // 瓦片尺寸
+const VW = 960, VH = 540;        // 逻辑分辨率
+const GRAV_UP = 1800;            // 上升重力 px/s²
+const GRAV_DOWN = 2200;          // 下落重力（落得快，马里奥手感）
+const MAX_FALL = 900;            // 终端下落速度
+const MAX_SPD = 220;             // 默认最大水平速度
+const RUN_SPD = 280;             // 按住 Shift 的跑步速度
+const ACC_G = 1500, ACC_A = 1000;        // 加速度：地面 / 空中
+const FRI_G = 1200, FRI_A = 300;         // 摩擦减速：地面 / 空中
+const JUMP_V = -560;             // 一段跳初速度（约 3 格高）
+const JUMP2_V = -460;            // 二段跳初速度（低约 20%）
+const COYOTE = 0.1;              // 土狼时间 100ms
+const JBUF = 0.1;                // 起跳缓冲 100ms
+const SW_DEBOUNCE = 0.15;        // 世界切换防抖 150ms
+const MAX_STEP = 8;              // 碰撞子步进最大位移，防高速穿墙
+
+// 状态机
+const ST = { MENU:0, PLAY:1, DEAD:2, DONE:3, END:4, PAUSE:5 };
+
+// 配色
+const COL = {
+  realBody:'#6b625b', realTop:'#8a8078', realEdge:'#4a443f', realSpike:'#8a8078',
+  voidBody:'rgba(96,70,208,0.62)', voidEdge:'#3ee6d0', voidGlow:'#7b5cff', voidSpike:'#3ee6d0',
+};
+
+/* ============================ 二、关卡数据 ============================ */
+/* 图例：'.'空  '#'平台(该世界专属)  '^'尖刺(该世界专属)
+ *       'E'终点界门(两界共用，标记一次)  'P'出生点(两界同坐标)
+ *       'm'小怪巡逻点，后可跟数字指定巡逻半径倍数：'m2'=TILE*2、'm5'=TILE*5，缺省 TILE*3
+ * 每关 deathHint 字段：同一关死亡≥2 次后，下次进入本关时额外显示的思路提示。
+ * 注：为保证每行宽度精确，空行用 d(n) 生成 n 个空格，连续字符用 h(s,n)。 */
+const d = n => '.'.repeat(n);
+const h = (s,n) => s.repeat(n);
+
+const LEVELS = [
+/* —— 第1关 · 虚桥初现（教学，加长版）：教"空中切换"与"来回翻转"，两处强制切换。
+ * 路线：实界地面(x0..7) → 跳起空切虚界浮桥(x10..16) → 桥头落到虚界地面(x17..27)
+ *       → 切回实界(x20..39)，跳过尖刺(x26..28) → 实界断崖(x40..47)：切虚界走过
+ *       → 虚界地面到 x47 为止：切回实界(x48..65) → 终点 x62 */
+{ name:'第1关 · 虚桥初现', hint:'前方断崖在实界无路可走——起跳后按 Z 翻转世界，虚界之桥自会显现。',
+  deathHint:'站在平台上按 Z 前，先看脚下另一世界有没有路',
+  mapReal:[
+  d(66),d(66),d(66),d(66),d(66),d(66),d(66),d(66),d(66),d(66),d(66),d(66),d(66),
+  '..P'+d(23)+h('^',3)+d(33)+'E'+d(3),
+  h('#',8)+d(12)+h('#',20)+d(8)+h('#',18),
+  h('#',8)+d(12)+h('#',20)+d(8)+h('#',18),
+  h('#',8)+d(12)+h('#',20)+d(8)+h('#',18)],
+  mapVoid:[
+  d(66),d(66),d(66),d(66),d(66),d(66),d(66),d(66),d(66),d(66),d(66),d(66),
+  d(10)+h('#',7)+d(49),
+  '..P'+d(63),
+  h('#',8)+d(9)+h('#',11)+d(12)+h('#',8)+d(18),
+  h('#',8)+d(9)+h('#',11)+d(12)+h('#',8)+d(18),
+  h('#',8)+d(9)+h('#',11)+d(12)+h('#',8)+d(18)]},
+
+/* —— 第2关 · 空中交错（加长版）：两段空中链，必须空中切换 4 次。
+ * 路线：实界地面(x0..8) → A(x11..13) → 空切虚界 B(x17..19) → 空切实界 C(x23..24)
+ *       → 实界地面(x29..55)：跳尖刺(x33..35)、躲巡逻怪(m, x37) → 跳上 D(x50..52)
+ *       → 空切虚界 B2(x56..58，正下方是断崖) → 空切实界地面(x62..71) → 终点 x66 */
+{ name:'第2关 · 空中交错', hint:'平台高低交错：跳起悬空的瞬间按 Z，落到另一侧的平台。',
+  deathHint:'跳起来之后再按 Z，落地前切换到位',
+  mapReal:[
+  d(72),d(72),d(72),d(72),d(72),d(72),d(72),d(72),d(72),d(72),d(72),d(72),
+  d(11)+h('#',3)+d(9)+h('#',2)+d(25)+h('#',3)+d(19),
+  '..P'+d(30)+h('^',3)+d(1)+'m'+d(28)+'E'+d(5),
+  h('#',9)+d(20)+h('#',27)+d(6)+h('#',10),
+  h('#',9)+d(20)+h('#',27)+d(6)+h('#',10),
+  h('#',9)+d(20)+h('#',27)+d(6)+h('#',10)],
+  mapVoid:[
+  d(72),d(72),d(72),d(72),d(72),d(72),d(72),d(72),d(72),d(72),
+  d(17)+h('#',3)+d(52),
+  d(56)+h('#',3)+d(13),
+  d(72),
+  '..P'+d(69),
+  h('#',9)+d(63),
+  h('#',9)+d(63),
+  h('#',9)+d(63)]},
+
+/* —— 第3关 · 虚实锋芒（加长版）：尖刺与"看似安全"的平台绑定。
+ * 实界 A(x10..14) 上方虚界悬着陷阱尖刺——站上去切换即死；B(x18..22) 下方虚界是深渊。
+ * 必须踩虚界窄台 C(x26..28，仅3格)/D(x33..38)，其正下方实界全是地刺(x26..38)；
+ * 从 D 跳起空切回实界，越过地刺 x41..42 落到安全地面(x43..59) → 跳上 P1(x62..64)
+ * → 空切虚界 P2(x68..70) → 空切实界地面(x74..87) → 终点 x82 */
+{ name:'第3关 · 虚实锋芒', hint:'尖刺分属两界：切换前看清脚下，有的路实界看似安全，虚界却暗藏锋刃。',
+  deathHint:'实界平台看似安全时，虚界对应位置常悬着尖刺——别停留，立刻切走',
+  mapReal:[
+  d(88),d(88),d(88),d(88),d(88),d(88),d(88),d(88),d(88),d(88),d(88),d(88),
+  d(10)+h('#',5)+d(3)+h('#',5)+d(39)+h('#',3)+d(23),
+  '..P'+d(23)+h('^',13)+d(2)+h('^',2)+d(39)+'E'+d(5),
+  h('#',8)+d(18)+h('#',34)+d(14)+h('#',14),
+  h('#',8)+d(18)+h('#',34)+d(14)+h('#',14),
+  h('#',8)+d(18)+h('#',34)+d(14)+h('#',14)],
+  mapVoid:[
+  d(88),d(88),d(88),d(88),d(88),d(88),d(88),d(88),d(88),d(88),d(88),
+  d(10)+h('^',5)+d(53)+h('#',3)+d(17),
+  d(88),
+  '..P'+d(23)+h('#',3)+d(4)+h('#',6)+d(49),
+  h('#',8)+d(46)+h('#',6)+d(28),
+  h('#',8)+d(46)+h('#',6)+d(28),
+  h('#',8)+d(46)+h('#',6)+d(28)]},
+
+/* —— 第4关 · 巡影回避（加长版）：两座守桥，双抉择。
+ * 断崖 x26..43 与 x60..75 两界都没有地面，唯一通路是两座双界桥(r12)：
+ * 桥1(x29..40)：实界有快守卫 m2(x35)，虚界有小怪 m(x31) 巡逻且桥面悬尖刺(x34..36)；
+ * 桥2(x62..71)：实界又有守卫 m2(x66)，虚界桥面悬尖刺(x66..68)。
+ * 落地后还有尖刺(x47..49)与守门怪(m, x52) → 终点 x78 */
+{ name:'第4关 · 巡影回避', hint:'界隙小怪只在自己的世界活动：看准巡逻节奏跳过它，或翻转世界让它消失。',
+  deathHint:'看准小怪走远的瞬间再跳，或者切世界让它消失',
+  mapReal:[
+  d(84),d(84),d(84),d(84),d(84),d(84),d(84),d(84),d(84),d(84),d(84),
+  d(35)+'m2'+d(29)+'m2'+d(16),
+  d(29)+h('#',12)+d(21)+h('#',10)+d(12),
+  '..P'+d(9)+'m5'+d(33)+h('^',3)+d(2)+'m'+d(25)+'E'+d(5),
+  h('#',26)+d(18)+h('#',16)+d(16)+h('#',8),
+  h('#',26)+d(18)+h('#',16)+d(16)+h('#',8),
+  h('#',26)+d(18)+h('#',16)+d(16)+h('#',8)],
+  mapVoid:[
+  d(84),d(84),d(84),d(84),d(84),d(84),d(84),d(84),d(84),d(84),d(84),
+  d(31)+'m'+d(2)+h('^',3)+d(29)+h('^',3)+d(15),
+  d(29)+h('#',12)+d(21)+h('#',10)+d(12),
+  '..P'+d(11)+h('^',3)+d(67),
+  h('#',26)+d(18)+h('#',16)+d(16)+h('#',8),
+  h('#',26)+d(18)+h('#',16)+d(16)+h('#',8),
+  h('#',26)+d(18)+h('#',16)+d(16)+h('#',8)]},
+
+/* —— 第5关 · 连续翻跃：2 格窄台链，空中连续切换 6 次。
+ * A(实,r13) → 空切 B(虚,r11) → 空切 C(实,r12) → 空切 D(虚,r11) → 虚界地面(x29..38)
+ * → 空切 G(实,r12) → 空切 H(虚,r11) → 实界地面(x50..63) → 跳上 I(x66..68，实)
+ * → 空切 J(虚,x72..73) → 空切实界地面(x77..91) → 终点 x86。全部窄台宽 2~3 格 */
+{ name:'第5关 · 连续翻跃', hint:'长断崖与窄台相连：空中连续翻转配合二段跳，节奏决定成败。',
+  deathHint:'二段跳留到最后一刻用，切换要比平时更快',
+  mapReal:[
+  d(92),d(92),d(92),d(92),d(92),d(92),d(92),d(92),d(92),d(92),d(92),d(92),
+  d(19)+h('#',2)+d(21)+h('#',2)+d(22)+h('#',3)+d(23),
+  '..P'+d(6)+h('#',2)+d(75)+'E'+d(5),
+  h('#',7)+d(43)+h('#',13)+d(13)+h('#',16),
+  h('#',7)+d(43)+h('#',13)+d(13)+h('#',16),
+  h('#',7)+d(43)+h('#',13)+d(13)+h('#',16)],
+  mapVoid:[
+  d(92),d(92),d(92),d(92),d(92),d(92),d(92),d(92),d(92),d(92),d(92),
+  d(14)+h('#',2)+d(8)+h('#',2)+d(21)+h('#',2)+d(23)+h('#',2)+d(18),
+  d(92),
+  '..P'+d(89),
+  h('#',7)+d(22)+h('#',10)+d(13)+h('#',12)+d(28),
+  h('#',7)+d(22)+h('#',10)+d(13)+h('#',12)+d(28),
+  h('#',7)+d(22)+h('#',10)+d(13)+h('#',12)+d(28)]},
+
+/* —— 第6关 · 夹缝极限（加长版）：综合关。
+ * 地刺(x10..12) → 空切虚界窄台(x22..24) → 空切实界小台(x26..28) → 空切虚界大台
+ * (x30..38)：实界桥有快守卫 m2、虚界台面悬尖刺(x34..36)，双重抉择 → 虚界窄台
+ * (x41..42) 起跳，空中切实界躲开虚界地刺(x43..46)，落实界地面(x46..69)
+ * → 跳上 P1(实,x70..72) → 空切虚界 P2(x76..78) → 空切实界地面(x82..95) → 终点 x89 */
+{ name:'第6关 · 夹缝极限', hint:'尖刺、怪影与连续切换交织——在崩塌的夹缝里找到唯一的出路。',
+  deathHint:'这一关的节奏是：跳—切—跳—切，别停',
+  mapReal:[
+  d(96),d(96),d(96),d(96),d(96),d(96),d(96),d(96),d(96),d(96),d(96),
+  d(36)+'m2'+d(58),
+  d(33)+h('#',6)+d(31)+h('#',3)+d(23),
+  '..P'+d(7)+h('^',3)+d(13)+h('#',3)+d(23)+h('^',3)+d(34)+'E'+d(6),
+  h('#',20)+d(26)+h('#',24)+d(12)+h('#',14),
+  h('#',20)+d(26)+h('#',24)+d(12)+h('#',14),
+  h('#',20)+d(26)+h('#',24)+d(12)+h('#',14)],
+  mapVoid:[
+  d(96),d(96),d(96),d(96),d(96),d(96),d(96),d(96),d(96),d(96),d(96),
+  d(34)+h('^',3)+d(59),
+  d(22)+h('#',3)+d(5)+h('#',9)+d(2)+h('#',2)+d(33)+h('#',3)+d(17),
+  '..P'+d(12)+h('^',3)+d(25)+h('^',4)+d(49),
+  h('#',20)+d(20)+h('#',24)+d(32),
+  h('#',20)+d(20)+h('#',24)+d(32),
+  h('#',20)+d(20)+h('#',24)+d(32)]},
+];
+
+/* ============================ 三、地图解析 ============================ */
+
+// 把每行的连续 '#' 合并成矩形，再纵向合并，减少绘制与碰撞检测量
+function mergeRects(list){
+  let changed = true;
+  while(changed){
+    changed = false;
+    for(let i=0;i<list.length;i++){
+      for(let j=i+1;j<list.length;j++){
+        const a=list[i], b=list[j];
+        if(a.x===b.x && a.w===b.w){
+          if(Math.abs(a.y+a.h-b.y)<0.5){ a.h+=b.h; list.splice(j,1); changed=true; }
+          else if(Math.abs(b.y+b.h-a.y)<0.5){ b.h+=a.h; list.splice(i,1); changed=true; break; }
+        }
+      }
+    }
+  }
+}
+
+// 解析关卡字符串地图，生成：平台矩形 / 尖刺 / 小怪 / 界门 / 出生点
+function buildLevel(def){
+  const rowsN = Math.max(def.mapReal.length, def.mapVoid.length);
+  const cols = Math.max(...def.mapReal.map(r=>r.length), ...def.mapVoid.map(r=>r.length));
+  const R = def.mapReal.map(r=>r.padEnd(cols,'.'));
+  const V = def.mapVoid.map(r=>r.padEnd(cols,'.'));
+  const level = {
+    name:def.name, hint:def.hint, w:cols, h:rowsN,
+    solids:{ real:[], void:[] },
+    spikes:{ real:[], void:[] },
+    enemies:[], exit:null, spawn:{x:TILE*2, y:0},
+  };
+  const collect = (map, world)=>{
+    const key = world===0 ? 'real' : 'void';
+    for(let y=0;y<rowsN;y++){
+      let x=0;
+      while(x<cols){
+        const c = map[y][x];
+        if(c==='#'){                       // 平台：合并水平连续格
+          let x0=x; while(x<cols && map[y][x]==='#') x++;
+          level.solids[key].push({x:x0*TILE, y:y*TILE, w:(x-x0)*TILE, h:TILE});
+          continue;
+        }
+        if(c==='^'){                       // 尖刺：碰撞盒缩小（判定更宽容）
+          level.spikes[key].push({x:x*TILE+5, y:y*TILE+16, w:TILE-10, h:TILE-16});
+        }
+        if(c==='m'){                       // 小怪巡逻点：'m'后可跟数字=巡逻半径倍数(m2/m5)，缺省3
+          let mul = 3, x0 = x;
+          if(x+1<cols && map[y][x+1]>='1' && map[y][x+1]<='9'){ mul = +map[y][x+1]; x++; }
+          level.enemies.push({x:x0*TILE+2, y:(y+1)*TILE-24, w:28, h:24,
+            ox:x0*TILE+2, dir:Math.random()<0.5?-1:1, spd:42, range:TILE*mul,
+            world:world, phase:Math.random()*6.28});
+        }
+        if(c==='P'){                       // 出生点（两界应同坐标）
+          level.spawn = {x:x*TILE+4, y:(y+1)*TILE-32};
+        }
+        if(c==='E'){                       // 终点界门（两界共用，统一生成一次）
+          if(!level.exit) level.exit = {x:x*TILE, y:y*TILE};
+        }
+        x++;
+      }
+    }
+  };
+  collect(R,0); collect(V,1);
+  mergeRects(level.solids.real);
+  mergeRects(level.solids.void);
+  return level;
+}
+
+/* ============================ 四、输入系统 ============================ */
+const cvs = document.getElementById('game');
+const ctx = cvs.getContext('2d');
+// 4 倍超采样：canvas 物理像素 3840x2160，基础变换放大 4 倍，
+// 之后所有绘制代码仍使用逻辑坐标 0~960 / 0~540，无需手动乘倍数
+ctx.setTransform(4, 0, 0, 4, 0, 0);
+
+/* ============================ 图片美术资源 ============================ */
+// 加载 image/ 目录下的美术素材；任何一张加载失败都不影响游戏，
+// 对应绘制自动回退到原有程序化方案
+const ART = {
+  bgReal : 'image/IMG_5806.JPG.JPG',        // 实界背景：暖灰金色山地
+  bgVoid : 'image/IMG_5804.JPG.JPG',        // 虚界背景：紫青霓虹山地
+  menuBg : 'image/IMG_5807.JPG.JPG',        // 菜单背景：双岛夹缝概念图
+  logo   : 'image/IMG_5809.JPG-nobg.png',        // 「幻途分野」霓虹 logo（无底版）
+  frame  : 'image/IMG_5808.JPG-nobg.png',        // 霓虹科技边框（无底版）
+  hero   : 'image/BgSub_IMG_5805.JPG.png',       // 玩家立绘（朝右）
+  heroL  : 'image/BgSub_IMG_58051.JPG.png',      // 玩家立绘（朝左，专用镜像图）
+};
+const IMG = {};
+let heroMatte = 'screen';                    // 'alpha'=图片自带透明通道；'screen'=黑底用滤色混合抠掉
+for(const k in ART){
+  const im = new Image();
+  im.onload = ()=>{ IMG[k] = im; if(k==='hero') buildHeroSprite(); };
+  im.src = ART[k];
+}
+// 探测立绘是否自带 alpha（BgSub 版应为透明底）；file:// 下 getImageData 受限时回退 screen 混合
+function buildHeroSprite(){
+  try{
+    const t = document.createElement('canvas');
+    t.width = IMG.hero.width; t.height = IMG.hero.height;
+    const tc = t.getContext('2d');
+    tc.drawImage(IMG.hero, 0, 0);
+    heroMatte = tc.getImageData(0, 0, 1, 1).data[3] < 250 ? 'alpha' : 'screen';
+  }catch(e){ heroMatte = 'screen'; }
+}
+// 按 cover 方式把图片铺满逻辑画布
+function drawArtCover(im, alpha){
+  if(!im || alpha <= 0.01) return;
+  const s = Math.max(VW/im.width, VH/im.height);
+  const w = im.width*s, h2 = im.height*s;
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, alpha);
+  ctx.drawImage(im, (VW-w)/2, (VH-h2)/2, w, h2);
+  ctx.restore();
+}
+
+const KEY = {
+  left : ['ArrowLeft','KeyA'],
+  right: ['ArrowRight','KeyD'],
+  jump : ['Space','ArrowUp','KeyW'],
+};
+let keys = {};
+let mouse = {x:0, y:0};
+const down = list => list.some(k=>keys[k]);
+
+function canvasPos(e){
+  const r = cvs.getBoundingClientRect();
+  return { x:(e.clientX-r.left)*VW/r.width, y:(e.clientY-r.top)*VH/r.height };
+}
+cvs.addEventListener('mousemove', e=>{ mouse = canvasPos(e); updateCursor(); });
+cvs.addEventListener('click', e=>{
+  const p = canvasPos(e);
+  if(state===ST.MENU && inRect(p, BTN_START)) startGame();
+  else if(state===ST.END && inRect(p, BTN_RESTART)) gotoMenu();
+  else if(state===ST.DONE) nextLevel();
+  else if(state===ST.PLAY && introT>0){ introT=0; jbuf=0; }
+});
+function inRect(p,r){ return p.x>=r.x && p.x<=r.x+r.w && p.y>=r.y && p.y<=r.y+r.h; }
+function updateCursor(){
+  let hot = false;
+  if(state===ST.MENU && inRect(mouse,BTN_START)) hot=true;
+  if(state===ST.END && inRect(mouse,BTN_RESTART)) hot=true;
+  cvs.style.cursor = hot ? 'pointer' : 'default';
+}
+addEventListener('blur', ()=>{ keys={}; });
+
+addEventListener('keydown', e=>{
+  // 防止方向键/空格滚动页面
+  if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+  if(e.code==='KeyP'){ togglePause(); return; }   // 暂停独立处理
+  if(state===ST.PAUSE) return;                    // 暂停时按键不响应
+  keys[e.code]=true;
+  if(e.repeat) return;                            // 忽略按住重复触发
+  // 任意键跳过关卡简介
+  if(state===ST.PLAY && introT>0){ introT=0; jbuf=0; }
+  if(state!==ST.PLAY){ handleMenuKeys(e.code); return; }
+  if(KEY.jump.includes(e.code)) jbuf = JBUF;      // 起跳缓冲
+  if(e.code==='KeyZ') switchWorld();              // 虚实翻转
+  if(e.code==='KeyR') loadLevel(levelIdx);        // 重开本关
+});
+addEventListener('keyup', e=>{
+  keys[e.code]=false;
+  // 可变跳跃高度：上升中松开跳跃键，截断上升
+  if(KEY.jump.includes(e.code) && state===ST.PLAY && player.vy<0) player.vy*=0.5;
+});
+
+function handleMenuKeys(code){
+  if(state===ST.MENU && (code==='Enter'||code==='Space'||code==='KeyZ')) startGame();
+  else if(state===ST.DONE && (code==='Enter'||code==='Space'||code==='KeyZ')) nextLevel();
+  else if(state===ST.END && (code==='Enter'||code==='Space'||code==='KeyR')) gotoMenu();
+}
+function togglePause(){
+  if(state===ST.PLAY) state=ST.PAUSE;
+  else if(state===ST.PAUSE) state=ST.PLAY;
+}
+
+/* ============================ 五、物理与碰撞 ============================ */
+function rectsOverlap(a,b){
+  return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+function solidAt(solids, px, py){
+  for(const s of solids)
+    if(px>=s.x && px<=s.x+s.w && py>=s.y && py<=s.y+s.h) return true;
+  return false;
+}
+
+// AABB 分轴碰撞 + 子步进（按 MAX_STEP 拆分位移，防止高速穿墙）
+function moveAndCollide(dtS){
+  const solids = level.solids[world===0?'real':'void'];
+  let dx = player.vx*dtS, dy = player.vy*dtS;
+  const steps = Math.max(1, Math.ceil(Math.max(Math.abs(dx),Math.abs(dy))/MAX_STEP));
+  dx/=steps; dy/=steps;
+  player.grounded = false;
+  for(let i=0;i<steps;i++){
+    player.x += dx;                              // 先处理 X 轴
+    for(const s of solids){
+      if(rectsOverlap(player,s)){
+        if(dx>0) player.x = s.x - player.w;
+        else if(dx<0) player.x = s.x + s.w;
+        player.vx = 0; dx = 0;
+      }
+    }
+    player.y += dy;                              // 再处理 Y 轴
+    for(const s of solids){
+      if(rectsOverlap(player,s)){
+        if(dy>0){                                // 下落落地
+          player.y = s.y - player.h;
+          if(player.vy>420) player.landT = 0.12; // 落地压扁
+          player.grounded = true;
+        }else if(dy<0){                          // 顶头
+          player.y = s.y + s.h;
+        }
+        player.vy = 0; dy = 0;
+      }
+    }
+  }
+}
+
+function doJump(v){ player.vy=v; jbuf=0; coyote=0; player.jumpT=0.12; }
+
+function updatePlayer(dtS){
+  // 水平：加速度 + 摩擦力平滑移动
+  const dir = (down(KEY.right)?1:0) - (down(KEY.left)?1:0);
+  const maxSpd = (keys['ShiftLeft']||keys['ShiftRight']) ? RUN_SPD : MAX_SPD;
+  if(dir!==0){
+    player.vx += dir*(player.grounded?ACC_G:ACC_A)*dtS;
+    player.face = dir;
+  }else{
+    const fri = player.grounded?FRI_G:FRI_A;
+    if(player.vx>0) player.vx = Math.max(0, player.vx-fri*dtS);
+    else if(player.vx<0) player.vx = Math.min(0, player.vx+fri*dtS);
+  }
+  player.vx = Math.max(-maxSpd, Math.min(maxSpd, player.vx));
+
+  // 竖直：上升重力小、下落重力大
+  player.vy += (player.vy<0 ? GRAV_UP : GRAV_DOWN)*dtS;
+  if(player.vy>MAX_FALL) player.vy = MAX_FALL;
+
+  // 跳跃：jump buffer + coyote time + 二段跳
+  if(jbuf>0){
+    if(player.grounded || coyote>0){ doJump(JUMP_V); jumpsUsed=1; }
+    else if(jumpsUsed<2){ doJump(JUMP2_V); jumpsUsed=2; }
+  }
+
+  moveAndCollide(dtS);
+
+  if(player.grounded){ coyote=COYOTE; jumpsUsed=0; player.standT+=dtS;
+    player.runPhase+=Math.abs(player.vx)*dtS*0.06; }
+  else { coyote -= dtS; player.standT = 0; }
+  jbuf -= dtS;
+}
+
+/* ============================ 六、世界切换 ============================ */
+let world = 0;        // 0=实界 1=虚界
+let worldT = 0;       // 0..1 世界色调过渡
+let swCd = 0;         // 切换防抖计时
+let flashT = 0;       // 全屏闪光
+let shakeT = 0;       // 屏幕震动
+let crackT = 0;       // 裂隙波纹
+let cracks = [], particles = [];
+
+function switchWorld(){
+  if(swCd>0 || introT>0) return;          // 防抖：按住不连切
+  world = 1-world;
+  swCd = SW_DEBOUNCE;
+  flashT = 0.11;                          // 80~120ms 白/紫闪光
+  shakeT = 0.25;                          // 轻微屏幕震动
+  crackT = 0.3;                           // 裂隙波纹 300ms 消散
+  spawnSwitchFX();
+}
+
+// 生成切换特效：屏幕边缘随机折线裂隙 + 从玩家扩散的发光粒子
+function spawnSwitchFX(){
+  cracks = [];
+  for(let i=0;i<7;i++){
+    const side = (Math.random()*4)|0;
+    let x = side===0 ? 0 : side===1 ? VW : Math.random()*VW;
+    let y = side===2 ? 0 : side===3 ? VH : Math.random()*VH;
+    const tx = VW/2+(Math.random()-0.5)*220, ty = VH/2+(Math.random()-0.5)*180;
+    let ang = Math.atan2(ty-y, tx-x);
+    const pts=[{x,y}];
+    const n = 4+((Math.random()*3)|0);
+    for(let k=0;k<n;k++){
+      const len = 26+Math.random()*40;
+      ang += (Math.random()-0.5)*0.9;
+      x += Math.cos(ang)*len; y += Math.sin(ang)*len;
+      pts.push({x,y});
+    }
+    cracks.push(pts);
+  }
+  particles = [];
+  const cx = player.x+player.w/2, cy = player.y+player.h/2;
+  for(let i=0;i<26;i++){
+    const a = Math.random()*Math.PI*2, sp = 140+Math.random()*300;
+    particles.push({x:cx, y:cy, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp,
+      t:0, life:0.3+Math.random()*0.25, sz:2+Math.random()*2.5,
+      c:Math.random()<0.5 ? '#3ee6d0' : '#b28bff'});
+  }
+}
+
+/* ============================ 七、实体更新 ============================ */
+let state = ST.MENU;                 // 当前状态机状态
+let player, level=null, levelIdx=0;
+let jbuf=0, coyote=0, jumpsUsed=0;
+let introT=0, deadT=0, deathFlash=0, deaths=0;
+let deathsPerLevel=[];               // 每关死亡次数，用于 deathHint 显示
+let camX=0, time=0;
+const BTN_START   = {x:VW/2-115, y:352, w:230, h:52};
+const BTN_RESTART = {x:VW/2-115, y:380, w:230, h:52};
+
+// 星空背景粒子（预生成）
+const stars = [];
+for(let i=0;i<120;i++){
+  stars.push({x:Math.random()*VW*2, y:Math.random()*VH,
+    z:0.15+Math.random()*0.5, tw:Math.random()*6.28, sz:0.6+Math.random()*1.6});
+}
+
+function loadLevel(i){
+  levelIdx = i;
+  level = buildLevel(LEVELS[i]);
+  world = 0; worldT = 0;
+  camX = 0;
+  introT = 2.8; deadT = 0; deathFlash = 0;
+  swCd = flashT = shakeT = crackT = 0;
+  cracks = []; particles = [];
+  jbuf = coyote = 0; jumpsUsed = 0;
+  respawn();
+}
+function respawn(){
+  player = { x:level.spawn.x, y:level.spawn.y, w:24, h:32,
+    vx:0, vy:0, face:1, grounded:false,
+    landT:0, jumpT:0, runPhase:0, standT:0 };
+  world = 0;
+}
+function die(){
+  if(state!==ST.PLAY) return;
+  state = ST.DEAD; deadT = 0.85; deathFlash = 1; deaths++;
+  deathsPerLevel[levelIdx] = (deathsPerLevel[levelIdx]||0)+1;
+}
+function startGame(){ deaths = 0; deathsPerLevel = LEVELS.map(()=>0); loadLevel(0); state = ST.PLAY; }
+function nextLevel(){
+  if(levelIdx+1 >= LEVELS.length){ state = ST.END; }
+  else { loadLevel(levelIdx+1); state = ST.PLAY; }
+}
+function gotoMenu(){ state = ST.MENU; }
+
+// 小怪：只在所属世界激活，左右巡逻（撞墙/到边缘/超出范围掉头）
+function updateEnemies(dtS){
+  const solids = level.solids[world===0?'real':'void'];
+  for(const e of level.enemies){
+    if(e.world!==world) continue;
+    e.x += e.dir*e.spd*dtS;
+    if(e.x < e.ox-e.range){ e.x = e.ox-e.range; e.dir = 1; }
+    if(e.x > e.ox+e.range){ e.x = e.ox+e.range; e.dir = -1; }
+    const footX = e.dir>0 ? e.x+e.w+2 : e.x-2;
+    const footY = e.y+e.h+4, midY = e.y+e.h/2;
+    if(!solidAt(solids,footX,footY) || solidAt(solids,footX,midY)) e.dir *= -1;
+  }
+}
+
+// 危险判定：尖刺 / 小怪 / 坠落 / 终点界门（只检测当前世界）
+function checkHazards(){
+  const key = world===0?'real':'void';
+  const pr = {x:player.x+5, y:player.y+6, w:player.w-10, h:player.h-8};
+  for(const s of level.spikes[key]) if(rectsOverlap(pr,s)) return die();
+  for(const e of level.enemies){
+    if(e.world!==world) continue;
+    if(rectsOverlap(pr,{x:e.x+3,y:e.y+3,w:e.w-6,h:e.h-6})) return die();
+  }
+  if(player.y > level.h*TILE+80) return die();
+  const g = level.exit;
+  if(rectsOverlap({x:player.x,y:player.y,w:player.w,h:player.h},
+                  {x:g.x-6, y:g.y-24, w:TILE+12, h:TILE+24})){
+    state = ST.DONE;
+  }
+}
+
+// 相机：水平跟随 + 0.15 平滑插值 + ±80px 死区；小于一屏则固定
+function updateCamera(dtF){
+  const focus = camX + VW/2, pcx = player.x+player.w/2;
+  let desired = camX;
+  if(pcx > focus+80) desired = pcx-80-VW/2;
+  else if(pcx < focus-80) desired = pcx+80-VW/2;
+  const maxX = level.w*TILE - VW;
+  desired = maxX<=0 ? 0 : Math.max(0, Math.min(maxX, desired));
+  camX += (desired-camX)*(1-Math.pow(0.85,dtF));
+}
+
+function update(dtS, dtF){
+  time += dtS;
+  // 世界色调平滑过渡
+  worldT += ((world===1?1:0)-worldT)*(1-Math.pow(0.7,dtF));
+  // 特效计时衰减
+  swCd=Math.max(0,swCd-dtS); flashT=Math.max(0,flashT-dtS);
+  shakeT=Math.max(0,shakeT-dtS); crackT=Math.max(0,crackT-dtS);
+  deathFlash=Math.max(0,deathFlash-dtS*1.6);
+  if(player){ player.landT=Math.max(0,player.landT-dtS); player.jumpT=Math.max(0,player.jumpT-dtS); }
+  for(const p of particles){ p.t+=dtS; p.x+=p.vx*dtS; p.y+=p.vy*dtS; p.vx*=0.94; p.vy*=0.94; }
+  particles = particles.filter(p=>p.t<p.life);
+
+  switch(state){
+    case ST.PLAY:
+      if(introT>0){ introT-=dtS; break; }   // 关卡简介期间冻结
+      updatePlayer(dtS);
+      updateEnemies(dtS);
+      checkHazards();
+      if(state===ST.PLAY) updateCamera(dtF);
+      break;
+    case ST.DEAD:
+      deadT -= dtS;
+      if(deadT<=0){ respawn(); jbuf=0; coyote=0; jumpsUsed=0; state=ST.PLAY; }
+      break;
+    case ST.DONE: case ST.END: case ST.MENU: case ST.PAUSE:
+      break;
+  }
+}
+
+/* ============================ 八、渲染 ============================ */
+function lerp(a,b,t){ return a+(b-a)*t; }
+function lerpColor(c1,c2,t){
+  const p=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+  const a=p(c1),b=p(c2);
+  return `rgb(${lerp(a[0],b[0],t)|0},${lerp(a[1],b[1],t)|0},${lerp(a[2],b[2],t)|0})`;
+}
+function rr(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+
+// 背景：实界/虚界各一张美术背景图，随 worldT 交叉淡入（切换世界时背景一起翻转）；
+// 图片未加载时回退到深空渐变。星点保留，叠加在背景之上
+function drawBackground(){
+  if(IMG.bgReal || IMG.bgVoid){
+    ctx.fillStyle='#0b0a10'; ctx.fillRect(0,0,VW,VH);
+    drawArtCover(IMG.bgReal, 1-worldT);
+    drawArtCover(IMG.bgVoid, worldT);
+    ctx.fillStyle='rgba(5,4,12,0.30)'; ctx.fillRect(0,0,VW,VH);  // 压暗，保证平台可读性
+  }else{
+    const top = lerpColor('#1c1815','#100e1e',worldT);
+    const bot = lerpColor('#332a24','#231a3d',worldT);
+    const g = ctx.createLinearGradient(0,0,0,VH);
+    g.addColorStop(0,top); g.addColorStop(1,bot);
+    ctx.fillStyle=g; ctx.fillRect(0,0,VW,VH);
+  }
+  // 星点（视差 + 闪烁）
+  for(const s of stars){
+    const sx=((s.x - camX*s.z) % (VW*2)+VW*2)%(VW*2) - VW*0.5;
+    const a = 0.25+0.45*Math.abs(Math.sin(time*0.8+s.tw));
+    ctx.globalAlpha=a;
+    ctx.fillStyle = lerpColor('#d8c9a8','#a8b4ff',worldT);
+    ctx.fillRect(sx,s.y,s.sz,s.sz);
+  }
+  ctx.globalAlpha=1;
+}
+
+// 平台绘制：实界暖灰石质+顶面高光；虚界冷紫发光半透明
+function drawSolids(list, isVoid){
+  for(const s of list){
+    if(isVoid){
+      ctx.shadowColor = COL.voidGlow; ctx.shadowBlur = 14;
+      ctx.fillStyle = COL.voidBody;
+      ctx.fillRect(s.x,s.y,s.w,s.h);
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = COL.voidEdge; ctx.lineWidth = 1.5;
+      ctx.strokeRect(s.x+0.5,s.y+0.5,s.w-1,s.h-1);
+      ctx.fillStyle = 'rgba(62,230,208,0.85)';
+      ctx.fillRect(s.x, s.y, s.w, 3);       // 顶面高光
+    }else{
+      ctx.fillStyle = COL.realBody;
+      ctx.fillRect(s.x,s.y,s.w,s.h);
+      ctx.fillStyle = COL.realTop;
+      ctx.fillRect(s.x, s.y, s.w, 4);       // 顶面高光条
+      ctx.fillStyle = COL.realEdge;
+      ctx.fillRect(s.x, s.y+s.h-3, s.w, 3);
+      ctx.strokeStyle = 'rgba(30,26,22,0.8)'; ctx.lineWidth = 1;
+      ctx.strokeRect(s.x+0.5,s.y+0.5,s.w-1,s.h-1);
+    }
+  }
+}
+
+// 尖刺：暖灰/冷青三角
+function drawSpikes(list, isVoid){
+  for(const s of list){
+    const x=s.x-5, y=s.y-16;               // 还原到瓦片坐标
+    if(isVoid){ ctx.shadowColor=COL.voidEdge; ctx.shadowBlur=8; ctx.fillStyle='#2ec9b6'; }
+    else { ctx.fillStyle=COL.realSpike; }
+    tri(x,y);
+    ctx.shadowBlur=0;
+  }
+  function tri(x,y){
+    ctx.beginPath();
+    ctx.moveTo(x+2,y+TILE); ctx.lineTo(x+TILE/2,y+3); ctx.lineTo(x+TILE-2,y+TILE);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle='rgba(0,0,0,0.35)'; ctx.lineWidth=1; ctx.stroke();
+  }
+}
+
+// 终点界门：两界都渲染的旋转发光方框 + 漩涡脉冲
+function drawGate(){
+  const g = level.exit;
+  const cx = g.x+TILE/2, cy = g.y+TILE/2;
+  const pulse = 0.6+0.4*Math.sin(time*3);
+  ctx.save();
+  ctx.translate(cx,cy);
+  ctx.shadowColor='#3ee6d0'; ctx.shadowBlur=18*pulse;
+  ctx.strokeStyle='#3ee6d0'; ctx.lineWidth=2.5;
+  ctx.save(); ctx.rotate(time*1.2); ctx.strokeRect(-20,-20,40,40); ctx.restore();
+  ctx.shadowColor='#7b5cff'; ctx.shadowBlur=16*pulse;
+  ctx.strokeStyle='#b28bff'; ctx.lineWidth=2;
+  ctx.save(); ctx.rotate(-time*0.8); ctx.strokeRect(-13,-13,26,26); ctx.restore();
+  // 中心漩涡光点
+  const rg = ctx.createRadialGradient(0,0,1,0,0,10+4*pulse);
+  rg.addColorStop(0,'rgba(255,255,255,0.95)');
+  rg.addColorStop(0.5,'rgba(62,230,208,0.7)');
+  rg.addColorStop(1,'rgba(123,92,255,0)');
+  ctx.fillStyle=rg;
+  ctx.beginPath(); ctx.arc(0,0,10+4*pulse,0,6.283); ctx.fill();
+  ctx.restore();
+}
+
+// 小怪：方块生物，实界暖色 / 虚界冷色，上下浮动 + 眼睛发光
+function drawEnemies(){
+  for(const e of level.enemies){
+    if(e.world!==world) continue;
+    const isVoid = e.world===1;
+    const yy = e.y + Math.sin(time*4+e.phase)*2;
+    ctx.save();
+    if(isVoid){ ctx.shadowColor=COL.voidEdge; ctx.shadowBlur=10; ctx.fillStyle='rgba(76,52,170,0.9)'; }
+    else { ctx.fillStyle='#7d5638'; }
+    rr(e.x,yy,e.w,e.h,5); ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.strokeStyle=isVoid?COL.voidEdge:'#a87848'; ctx.lineWidth=1.5;
+    rr(e.x+0.5,yy+0.5,e.w-1,e.h-1,5); ctx.stroke();
+    // 发光眼睛（随朝向偏移）
+    const ex = e.x+e.w/2 + e.dir*4;
+    ctx.fillStyle = isVoid ? '#aefcff' : '#ffd9a0';
+    ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.arc(ex-5, yy+9, 2.4, 0, 6.283); ctx.fill();
+    ctx.beginPath(); ctx.arc(ex+5, yy+9, 2.4, 0, 6.283); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// 玩家：界隙行者（碰撞盒 24x32），绘制美术立绘（方块头骑士），保留
+// squash/stretch、跑动浮动与朝向翻转；立绘未加载时回退到程序化方块
+function drawPlayer(){
+  const p = player;
+  let st = 0;
+  if(p.jumpT>0) st = 0.10*(p.jumpT/0.12);       // 起跳拉长
+  else if(p.landT>0) st = -0.10*(p.landT/0.12); // 落地压扁
+  const sy = 1+st, sx = 1-st*0.7;
+  let bobY = 0;
+  if(p.grounded && Math.abs(p.vx)>30) bobY = Math.sin(p.runPhase)*1.5;
+  const dw = p.w*sx, dh = p.h*sy;
+  const dx = p.x+p.w/2-dw/2, dy = p.y+p.h-dh+bobY;
+  const edge = lerpColor('#ffb86b','#b28bff',worldT);
+  ctx.save();
+  ctx.shadowColor=edge; ctx.shadowBlur = 8+8*worldT;
+  if(IMG.hero){
+    if(heroMatte==='screen'){ ctx.globalCompositeOperation='screen'; ctx.shadowBlur=0; }
+    // 左右各用专用立绘：朝左用 heroL，朝右用 hero；朝左图缺失时回退为镜像 hero
+    const im = (p.face<0 && IMG.heroL) ? IMG.heroL : IMG.hero;
+    const flip = (p.face<0 && !IMG.heroL);
+    // 裁剪立绘角色主体区域，等比放大（约碰撞盒 2.2 倍高），底边对齐脚底
+    const cw = im.width*0.52, ch = im.height*0.84;
+    const sh = p.h*2.2*sy, sw = sh*(cw/ch)*sx;
+    ctx.translate(p.x+p.w/2, p.y+p.h+bobY);
+    if(flip) ctx.scale(-1, 1);
+    ctx.drawImage(im, im.width*0.24, im.height*0.10, cw, ch, -sw/2, -sh, sw, sh);
+    ctx.globalCompositeOperation='source-over';
+  }else{
+    const body = lerpColor('#f2e9dc','#a8f0ff',worldT);
+    ctx.fillStyle=body;
+    rr(dx,dy,dw,dh,5); ctx.fill();
+    ctx.strokeStyle=lerpColor('#8a8078','#3ee6d0',worldT); ctx.lineWidth=1.5;
+    rr(dx+0.5,dy+0.5,dw-1,dh-1,5); ctx.stroke();
+    // 界石光点（胸口，脉冲）
+    const pulse = 0.7+0.3*Math.sin(time*5);
+    const gx=p.x+p.w/2, gy=dy+dh*0.38;
+    const rg=ctx.createRadialGradient(gx,gy,0.5,gx,gy,5*pulse);
+    rg.addColorStop(0,'rgba(255,255,255,1)');
+    rg.addColorStop(0.4,worldT<0.5?'rgba(255,184,107,0.9)':'rgba(178,139,255,0.9)');
+    rg.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=rg;
+    ctx.beginPath(); ctx.arc(gx,gy,5*pulse,0,6.283); ctx.fill();
+    // 眼睛（朝向）
+    ctx.fillStyle='#1c1a18';
+    const ox = p.face>0 ? 3 : -3;
+    ctx.fillRect(p.x+p.w/2+ox-4, dy+8, 2.5, 4.5);
+    ctx.fillRect(p.x+p.w/2+ox+2, dy+8, 2.5, 4.5);
+  }
+  ctx.restore();
+}
+
+// 裂隙波纹 + 粒子
+function drawCracks(){
+  if(crackT<=0) return;
+  const a = crackT/0.3;
+  ctx.save();
+  ctx.globalAlpha = a*0.8;
+  ctx.strokeStyle='#9fe9ff'; ctx.lineWidth=1.6;
+  ctx.shadowColor='#3ee6d0'; ctx.shadowBlur=8;
+  for(const pts of cracks){
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x,pts[0].y);
+    for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x,pts[i].y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawParticles(){
+  for(const p of particles){
+    ctx.globalAlpha = Math.max(0,1-p.t/p.life);
+    ctx.fillStyle=p.c;
+    ctx.shadowColor=p.c; ctx.shadowBlur=6;
+    ctx.fillRect(p.x-p.sz/2,p.y-p.sz/2,p.sz,p.sz);
+  }
+  ctx.globalAlpha=1; ctx.shadowBlur=0;
+}
+
+// HUD：关卡名 / 世界标识 / 操作提示
+function drawHUD(){
+  ctx.textBaseline='middle';
+  // 左上：关卡名
+  ctx.font='bold 16px "Microsoft YaHei",sans-serif';
+  ctx.textAlign='left';
+  ctx.fillStyle='rgba(0,0,0,0.35)'; rr(12,10,236,28,6); ctx.fill();
+  ctx.fillStyle='#f0e8d8'; ctx.fillText(level.name, 22, 25);
+  // 右上：当前世界
+  const wx=VW-158, isReal=world===0;
+  ctx.fillStyle='rgba(0,0,0,0.35)'; rr(wx,10,146,28,6); ctx.fill();
+  ctx.fillStyle=isReal?'rgba(255,184,107,0.9)':'rgba(62,230,208,0.9)';
+  rr(wx+8,15,18,18,4); ctx.fill();
+  ctx.font='bold 15px "Microsoft YaHei",sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle=isReal?'#ffcf9e':'#8ff7ea';
+  ctx.fillText(isReal?'实界':'虚界', wx+34, 25);
+  // 底部：常驻操作说明
+  ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.fillRect(0,VH-26,VW,26);
+  ctx.font='13px "Microsoft YaHei",sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(255,255,255,0.6)';
+  ctx.fillText('←→/AD 移动 · 空格/↑ 跳跃(二段) · Shift 疾跑 · Z 翻转世界 · R 重开 · P 暂停', VW/2, VH-13);
+}
+
+// 关卡简介覆盖层
+function drawIntro(){
+  if(introT<=0) return;
+  const a = Math.min(1, introT/0.4);
+  ctx.fillStyle=`rgba(5,4,10,${0.72*a})`;
+  ctx.fillRect(0,0,VW,VH);
+  ctx.globalAlpha=a;
+  // 霓虹边框面板（美术）
+  if(IMG.frame){
+    ctx.save();
+    ctx.globalAlpha=a*0.92;
+    ctx.drawImage(IMG.frame, VW/2-375, VH/2-122, 750, 244);
+    ctx.restore();
+    ctx.globalAlpha=a;
+  }
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.font='bold 38px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle= world===0?'#f2e9dc':'#a8f0ff';
+  ctx.shadowColor= world===0?'#ffb86b':'#7b5cff'; ctx.shadowBlur=16;
+  ctx.fillText(LEVELS[levelIdx].name, VW/2, VH/2-46);
+  ctx.shadowBlur=0;
+  ctx.font='17px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='rgba(255,255,255,0.85)';
+  ctx.fillText(LEVELS[levelIdx].hint, VW/2, VH/2+6);
+  // 同一关死亡≥2 次：额外显示思路提示
+  const showHint = (deathsPerLevel[levelIdx]||0)>=2 && LEVELS[levelIdx].deathHint;
+  if(showHint){
+    ctx.font='15px "Microsoft YaHei",sans-serif';
+    ctx.fillStyle='#ffb37a';
+    ctx.fillText('提示：'+LEVELS[levelIdx].deathHint, VW/2, VH/2+36);
+  }
+  if(Math.sin(time*5)>0){
+    ctx.font='14px "Microsoft YaHei",sans-serif';
+    ctx.fillStyle='rgba(255,255,255,0.5)';
+    ctx.fillText('按任意键开始', VW/2, showHint? VH/2+72 : VH/2+52);
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawDeathFX(){
+  if(deathFlash>0){
+    ctx.fillStyle=`rgba(255,40,40,${deathFlash*0.4})`;
+    ctx.fillRect(0,0,VW,VH);
+  }
+  if(state===ST.DEAD){
+    ctx.fillStyle='rgba(10,0,0,0.45)'; ctx.fillRect(0,0,VW,VH);
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.font='bold 30px "Microsoft YaHei",sans-serif';
+    ctx.fillStyle='#ff8a7a';
+    ctx.fillText('坠入夹缝……', VW/2, VH/2-10);
+    ctx.font='14px "Microsoft YaHei",sans-serif';
+    ctx.fillStyle='rgba(255,255,255,0.55)';
+    ctx.fillText('即将回到本关起点', VW/2, VH/2+26);
+    // 本关死亡≥2 次：给出思路提示
+    if((deathsPerLevel[levelIdx]||0)>=2 && LEVELS[levelIdx].deathHint){
+      ctx.fillStyle='#ffb37a';
+      ctx.fillText('提示：'+LEVELS[levelIdx].deathHint, VW/2, VH/2+50);
+    }
+  }
+}
+
+function drawDoneOverlay(){
+  ctx.fillStyle='rgba(5,4,10,0.7)'; ctx.fillRect(0,0,VW,VH);
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.font='bold 40px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='#8ff7ea';
+  ctx.shadowColor='#3ee6d0'; ctx.shadowBlur=18;
+  ctx.fillText('关卡完成', VW/2, VH/2-40);
+  ctx.shadowBlur=0;
+  ctx.font='16px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='rgba(255,255,255,0.8)';
+  ctx.fillText(level.name+' · 已穿越', VW/2, VH/2+6);
+  ctx.fillStyle='rgba(255,255,255,0.55)';
+  ctx.fillText('按 Enter / Z / 点击 进入下一关', VW/2, VH/2+44);
+}
+
+function drawPauseOverlay(){
+  ctx.fillStyle='rgba(5,4,10,0.6)'; ctx.fillRect(0,0,VW,VH);
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.font='bold 34px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='#f0e8d8';
+  ctx.fillText('已暂停', VW/2, VH/2-14);
+  ctx.font='15px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='rgba(255,255,255,0.55)';
+  ctx.fillText('按 P 继续', VW/2, VH/2+24);
+}
+
+// 主菜单：双岛夹缝美术背景 + 美术 logo + 霓虹边框按钮（素材缺失时回退程序化绘制）
+function drawMenu(){
+  if(IMG.menuBg){
+    drawArtCover(IMG.menuBg, 1);
+    ctx.fillStyle='rgba(5,4,12,0.52)'; ctx.fillRect(0,0,VW,VH);
+  }else drawBackground();
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  // 标题：美术 logo
+  const pulse=0.75+0.25*Math.sin(time*2);
+  if(IMG.logo){
+    const lw=430, lh=lw*(IMG.logo.height/IMG.logo.width);
+    ctx.save();
+    ctx.shadowColor='#b28bff'; ctx.shadowBlur=22*pulse;
+    ctx.drawImage(IMG.logo, VW/2-lw/2, 92, lw, lh);
+    ctx.restore();
+  }else{
+    ctx.font='bold 72px "Microsoft YaHei",sans-serif';
+    ctx.shadowColor='#7b5cff'; ctx.shadowBlur=24*pulse;
+    ctx.fillStyle='#e9e2ff';
+    ctx.fillText('幻 途 分 野', VW/2, 158);
+    ctx.shadowBlur=0;
+  }
+  // 一句话简介
+  ctx.font='17px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='rgba(220,214,240,0.75)';
+  ctx.fillText('触碰开关翻转空间，虚实两层世界交错，在崩塌的夹缝里找到出路。', VW/2, 226);
+  // 双界示意条
+  const gw=340, gx=VW/2-gw/2, gy=258;
+  const g1=ctx.createLinearGradient(gx,0,gx+gw,0);
+  g1.addColorStop(0,'#6b625b'); g1.addColorStop(1,'#7b5cff');
+  ctx.fillStyle=g1; ctx.fillRect(gx,gy,gw,5);
+  ctx.fillStyle='#ffb86b'; ctx.fillRect(gx-46,gy-4,38,13);
+  ctx.fillStyle='#3ee6d0'; ctx.fillRect(gx+gw+8,gy-4,38,13);
+  ctx.font='12px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='rgba(255,184,107,0.8)'; ctx.fillText('实界', gx-27, gy+16);
+  ctx.fillStyle='rgba(62,230,208,0.8)'; ctx.fillText('虚界', gx+gw+27, gy+16);
+  // 开始按钮（霓虹边框美术）
+  const hov = inRect(mouse,BTN_START);
+  ctx.fillStyle = hov?'rgba(123,92,255,0.55)':'rgba(123,92,255,0.3)';
+  ctx.strokeStyle='#b28bff'; ctx.lineWidth=2;
+  rr(BTN_START.x,BTN_START.y,BTN_START.w,BTN_START.h,10);
+  ctx.fill(); ctx.stroke();
+  if(IMG.frame){
+    ctx.save();
+    ctx.globalAlpha = hov?1:0.85;
+    ctx.drawImage(IMG.frame, BTN_START.x-16, BTN_START.y-15, BTN_START.w+32, BTN_START.h+30);
+    ctx.restore();
+  }
+  ctx.font='bold 22px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='#fff';
+  ctx.fillText('开始游戏', VW/2, BTN_START.y+27);
+  // 操作说明
+  ctx.font='14px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='rgba(255,255,255,0.55)';
+  const lines=[
+    '←→ / A D — 左右移动　　空格 / ↑ — 跳跃（支持二段跳）',
+    'Z — 虚实翻转　　Shift — 疾跑　　R — 重开本关　　P — 暂停',
+    '虚界平台会以微光轮廓显现，翻转前先看清脚下的世界',
+  ];
+  lines.forEach((t,i)=>ctx.fillText(t, VW/2, 444+i*24));
+  ctx.font='12px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='rgba(255,255,255,0.3)';
+  ctx.fillText('按 Enter 或点击按钮开始', VW/2, 522);
+}
+
+// 结束页
+function drawEnd(){
+  drawBackground();
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.font='bold 52px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='#8ff7ea';
+  ctx.shadowColor='#3ee6d0'; ctx.shadowBlur=20;
+  ctx.fillText('穿 越 夹 缝', VW/2, 190);
+  ctx.shadowBlur=0;
+  ctx.font='18px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='rgba(255,255,255,0.8)';
+  ctx.fillText('六重分野皆已渡过，界隙行者找到了出路。', VW/2, 246);
+  ctx.font='15px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='rgba(255,255,255,0.5)';
+  ctx.fillText(`本次旅途坠落 ${deaths} 次`, VW/2, 286);
+  const hov = inRect(mouse,BTN_RESTART);
+  ctx.fillStyle = hov?'rgba(123,92,255,0.55)':'rgba(123,92,255,0.3)';
+  ctx.strokeStyle='#b28bff'; ctx.lineWidth=2;
+  rr(BTN_RESTART.x,BTN_RESTART.y,BTN_RESTART.w,BTN_RESTART.h,10);
+  ctx.fill(); ctx.stroke();
+  ctx.font='bold 20px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='#fff';
+  ctx.fillText('重新开始', VW/2, BTN_RESTART.y+27);
+  ctx.font='13px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle='rgba(255,255,255,0.4)';
+  ctx.fillText('按 Enter / R 返回', VW/2, 462);
+}
+
+function render(){
+  ctx.clearRect(0,0,VW,VH);
+  if(state===ST.MENU){ drawMenu(); return; }
+  if(state===ST.END){ drawEnd(); return; }
+  if(!level) return;
+
+  drawBackground();
+
+  // 屏幕震动
+  let shx=0, shy=0;
+  if(shakeT>0){
+    const m=6*(shakeT/0.25);
+    shx=(Math.random()-0.5)*2*m; shy=(Math.random()-0.5)*2*m;
+  }
+  ctx.save();
+  ctx.translate(-camX+shx, (level.h*TILE-VH)+shy);
+
+  // 当前世界的实体
+  const cur = world===0 ? 'real' : 'void';
+  const curIsVoid = world===1;
+  drawSolids(level.solids[cur], curIsVoid);
+  drawSpikes(level.spikes[cur], curIsVoid);
+  drawGate();
+  drawEnemies();
+  if(state!==ST.DEAD) drawPlayer();
+  drawParticles();
+  ctx.restore();
+
+  drawCracks();          // 裂隙（屏幕空间）
+  drawHUD();
+  drawDeathFX();
+  if(state===ST.DONE) drawDoneOverlay();
+  if(state===ST.PAUSE) drawPauseOverlay();
+  drawIntro();
+}
+
+/* ============================ 九、状态机与主循环 ============================ */
+// 状态流转：MENU →(开始)→ PLAY ⇄ PAUSE / DEAD(短暂停顿后复活) → DONE →(下一关)→ … → END →(重新开始)→ MENU
+// 主循环：requestAnimationFrame + dt 归一化（以 60fps 为基准）
+let last = performance.now();
+function frame(now){
+  const ms = Math.min(now-last, 50);   // 限制单帧最大间隔（切页返回不暴走）
+  last = now;
+  const dtS = ms/1000;                 // 秒（物理用）
+  const dtF = ms/16.667;               // 帧单位（插值/计时用，60fps 时 ≈1）
+  update(dtS, dtF);
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
