@@ -30,9 +30,9 @@
   #bS{right:calc(28px + env(safe-area-inset-right));bottom:calc(110px + env(safe-area-inset-bottom));width:52px;height:52px;font-size:16px;}
   #bP{top:calc(10px + env(safe-area-inset-top));right:calc(12px + env(safe-area-inset-right));width:40px;height:40px;font-size:15px;border-radius:10px;}
   #bRst{top:calc(10px + env(safe-area-inset-top));right:calc(60px + env(safe-area-inset-right));width:40px;height:40px;font-size:15px;border-radius:10px;}
-  /* —— 竖屏手机：舞台旋转 90°，游戏始终横屏显示（手机逆时针转 90° 握持即可）—— */
+  /* —— 竖屏手机：舞台（铺满视口）绕屏幕中心旋转 90°，游戏始终横屏居中显示 —— */
   @media (orientation:portrait) and (hover:none) and (pointer:coarse){
-    #stage{width:100vh;height:100vw;width:100dvh;transform:rotate(90deg);}
+    #stage{transform:rotate(90deg);}
     canvas{width:min(100vh,177.78vw);height:min(56.25vh,100vw);
       width:min(100dvh,177.78vw);height:min(56.25dvh,100vw);box-shadow:none;}
   }
