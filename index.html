@@ -2,18 +2,49 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>幻途分野 - 虚实二界平台闯关</title>
 <style>
   html,body{margin:0;padding:0;height:100%;background:#0b0a10;overflow:hidden;
     display:flex;align-items:center;justify-content:center;}
   canvas{width:min(100vw,177.78vh);height:min(56.25vw,100vh);
     box-shadow:0 0 80px rgba(123,92,255,.18), 0 0 30px rgba(0,0,0,.6);
-    outline:none;}
+    outline:none;touch-action:none;}
+  /* —— 触屏虚拟按键（仅触屏设备显示）—— */
+  #touchUI{display:none;position:fixed;inset:0;pointer-events:none;z-index:9;}
+  @media (hover:none) and (pointer:coarse){ #touchUI{display:block;} }
+  .tb{position:absolute;pointer-events:auto;touch-action:none;
+    user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;
+    display:flex;align-items:center;justify-content:center;
+    border-radius:50%;background:rgba(123,92,255,.26);border:2px solid rgba(62,230,208,.5);
+    color:#cfe9ff;font-size:20px;font-weight:700;
+    box-shadow:0 0 12px rgba(123,92,255,.35);}
+  .tb:active{background:rgba(123,92,255,.55);}
+  #bL{left:calc(16px + env(safe-area-inset-left));bottom:calc(22px + env(safe-area-inset-bottom));width:64px;height:64px;}
+  #bR{left:calc(94px + env(safe-area-inset-left));bottom:calc(22px + env(safe-area-inset-bottom));width:64px;height:64px;}
+  #bJ{right:calc(16px + env(safe-area-inset-right));bottom:calc(22px + env(safe-area-inset-bottom));width:78px;height:78px;font-size:24px;}
+  #bZ{right:calc(106px + env(safe-area-inset-right));bottom:calc(18px + env(safe-area-inset-bottom));width:60px;height:60px;}
+  #bS{right:calc(28px + env(safe-area-inset-right));bottom:calc(110px + env(safe-area-inset-bottom));width:52px;height:52px;font-size:16px;}
+  #bP{top:calc(10px + env(safe-area-inset-top));right:calc(12px + env(safe-area-inset-right));width:40px;height:40px;font-size:15px;border-radius:10px;}
+  #bRst{top:calc(10px + env(safe-area-inset-top));right:calc(60px + env(safe-area-inset-right));width:40px;height:40px;font-size:15px;border-radius:10px;}
+  /* —— 竖屏提示 —— */
+  #rot{display:none;position:fixed;top:0;left:0;right:0;z-index:10;text-align:center;
+    padding:6px;font:13px/1.4 sans-serif;color:#9fd8ff;background:rgba(11,10,16,.78);}
+  @media (orientation:portrait) and (hover:none) and (pointer:coarse){ #rot{display:block;} }
 </style>
 </head>
 <body>
-<canvas id="game" width="3840" height="2160"></canvas>
+<div id="rot">建议横屏游玩，体验更佳</div>
+<canvas id="game"></canvas>
+<div id="touchUI">
+  <div class="tb" id="bL">◀</div>
+  <div class="tb" id="bR">▶</div>
+  <div class="tb" id="bJ">跳</div>
+  <div class="tb" id="bZ">翻</div>
+  <div class="tb" id="bS">疾</div>
+  <div class="tb" id="bP">⏸</div>
+  <div class="tb" id="bRst">↺</div>
+</div>
 <script>
 "use strict";
 /* ==================================================================
@@ -267,9 +298,12 @@ function buildLevel(def){
 /* ============================ 四、输入系统 ============================ */
 const cvs = document.getElementById('game');
 const ctx = cvs.getContext('2d');
-// 4 倍超采样：canvas 物理像素 3840x2160，基础变换放大 4 倍，
-// 之后所有绘制代码仍使用逻辑坐标 0~960 / 0~540，无需手动乘倍数
-ctx.setTransform(4, 0, 0, 4, 0, 0);
+// 超采样：桌面 4 倍（3840x2160）；触屏设备降为 2 倍（1920x1080）保证手机流畅
+const IS_TOUCH = matchMedia('(hover: none) and (pointer: coarse)').matches;
+const SS = IS_TOUCH ? 2 : 4;
+cvs.width = VW*SS; cvs.height = VH*SS;
+// 基础变换放大 SS 倍，之后所有绘制代码仍使用逻辑坐标 0~960 / 0~540，无需手动乘倍数
+ctx.setTransform(SS, 0, 0, SS, 0, 0);
 
 /* ============================ 图片美术资源 ============================ */
 // 加载 image/ 目录下的美术素材；任何一张加载失败都不影响游戏，
@@ -329,6 +363,7 @@ cvs.addEventListener('click', e=>{
   const p = canvasPos(e);
   if(state===ST.MENU && inRect(p, BTN_START)) startGame();
   else if(state===ST.END && inRect(p, BTN_RESTART)) gotoMenu();
+  else if(state===ST.PAUSE) state=ST.PLAY;        // 手机：点屏幕继续
   else if(state===ST.DONE) nextLevel();
   else if(state===ST.PLAY && introT>0){ introT=0; jbuf=0; }
 });
@@ -370,6 +405,70 @@ function togglePause(){
   if(state===ST.PLAY) state=ST.PAUSE;
   else if(state===ST.PAUSE) state=ST.PLAY;
 }
+
+/* —— 触屏虚拟按键（手机端）—— */
+// 方向/疾跑：按住生效，松开失效
+function bindHold(id, code){
+  const el = document.getElementById(id);
+  const on  = e=>{ e.preventDefault(); keys[code]=true; };
+  const off = e=>{ e.preventDefault(); keys[code]=false; };
+  el.addEventListener('touchstart', on, {passive:false});
+  el.addEventListener('touchend', off, {passive:false});
+  el.addEventListener('touchcancel', off, {passive:false});
+  el.addEventListener('mousedown', on);
+  el.addEventListener('mouseup', off);
+  el.addEventListener('mouseleave', off);
+}
+bindHold('bL','ArrowLeft');
+bindHold('bR','ArrowRight');
+bindHold('bS','ShiftLeft');
+// 跳跃：按下=起跳缓冲，松开=截断上升（可变跳高）
+function tapJump(){
+  if(state===ST.PAUSE) return;
+  if(state!==ST.PLAY){ handleMenuKeys('Space'); return; }
+  if(introT>0){ introT=0; jbuf=0; return; }
+  keys['Space']=true; jbuf=JBUF;
+}
+function relJump(){
+  keys['Space']=false;
+  if(state===ST.PLAY && player.vy<0) player.vy*=0.5;
+}
+function tapFlip(){
+  if(state===ST.PAUSE) return;
+  if(state!==ST.PLAY){ handleMenuKeys('KeyZ'); return; }   // 菜单/结算界面兼作确认键
+  if(introT>0){ introT=0; jbuf=0; }
+  switchWorld();
+}
+(function(){
+  const el = document.getElementById('bJ');
+  el.addEventListener('touchstart', e=>{ e.preventDefault(); tapJump(); }, {passive:false});
+  el.addEventListener('touchend', e=>{ e.preventDefault(); relJump(); }, {passive:false});
+  el.addEventListener('touchcancel', e=>{ e.preventDefault(); relJump(); }, {passive:false});
+  el.addEventListener('mousedown', tapJump);
+  el.addEventListener('mouseup', relJump);
+})();
+(function(){
+  const el = document.getElementById('bZ');
+  const h = e=>{ e.preventDefault(); tapFlip(); };
+  el.addEventListener('touchstart', h, {passive:false});
+  el.addEventListener('mousedown', h);
+})();
+// 暂停 / 重开
+document.getElementById('bP').addEventListener('touchstart', e=>{ e.preventDefault(); togglePause(); }, {passive:false});
+document.getElementById('bP').addEventListener('mousedown', togglePause);
+document.getElementById('bRst').addEventListener('touchstart', e=>{ e.preventDefault();
+  if(state===ST.PLAY||state===ST.PAUSE||state===ST.DEAD) loadLevel(levelIdx);
+  else if(state===ST.END) gotoMenu();
+}, {passive:false});
+document.getElementById('bRst').addEventListener('mousedown', ()=>{
+  if(state===ST.PLAY||state===ST.PAUSE||state===ST.DEAD) loadLevel(levelIdx);
+  else if(state===ST.END) gotoMenu();
+});
+// 阻止手机上拖动页面 / 双击缩放
+document.addEventListener('touchmove', e=>{
+  if(e.target===cvs || (e.target.closest && e.target.closest('#touchUI'))) e.preventDefault();
+}, {passive:false});
+document.addEventListener('dblclick', e=>e.preventDefault());
 
 /* ============================ 五、物理与碰撞 ============================ */
 function rectsOverlap(a,b){
@@ -836,7 +935,7 @@ function drawHUD(){
   ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.fillRect(0,VH-26,VW,26);
   ctx.font='13px "Microsoft YaHei",sans-serif'; ctx.textAlign='center';
   ctx.fillStyle='rgba(255,255,255,0.6)';
-  ctx.fillText('←→/AD 移动 · 空格/↑ 跳跃(二段) · Shift 疾跑 · Z 翻转世界 · R 重开 · P 暂停', VW/2, VH-13);
+  ctx.fillText(IS_TOUCH ? '左侧按钮移动 · 右侧 跳/翻 按钮 · 疾=疾跑 ↺=重开 ⏸=暂停' : '←→/AD 移动 · 空格/↑ 跳跃(二段) · Shift 疾跑 · Z 翻转世界 · R 重开 · P 暂停', VW/2, VH-13);
 }
 
 // 关卡简介覆盖层
@@ -912,7 +1011,7 @@ function drawDoneOverlay(){
   ctx.fillStyle='rgba(255,255,255,0.8)';
   ctx.fillText(level.name+' · 已穿越', VW/2, VH/2+6);
   ctx.fillStyle='rgba(255,255,255,0.55)';
-  ctx.fillText('按 Enter / Z / 点击 进入下一关', VW/2, VH/2+44);
+  ctx.fillText(IS_TOUCH ? '点击屏幕进入下一关' : '按 Enter / Z / 点击 进入下一关', VW/2, VH/2+44);
 }
 
 function drawPauseOverlay(){
@@ -923,7 +1022,7 @@ function drawPauseOverlay(){
   ctx.fillText('已暂停', VW/2, VH/2-14);
   ctx.font='15px "Microsoft YaHei",sans-serif';
   ctx.fillStyle='rgba(255,255,255,0.55)';
-  ctx.fillText('按 P 继续', VW/2, VH/2+24);
+  ctx.fillText(IS_TOUCH ? '点击屏幕或 ⏸ 继续' : '按 P 继续', VW/2, VH/2+24);
 }
 
 // 主菜单：双岛夹缝美术背景 + 美术 logo + 霓虹边框按钮（素材缺失时回退程序化绘制）
@@ -988,7 +1087,7 @@ function drawMenu(){
   lines.forEach((t,i)=>ctx.fillText(t, VW/2, 444+i*24));
   ctx.font='12px "Microsoft YaHei",sans-serif';
   ctx.fillStyle='rgba(255,255,255,0.3)';
-  ctx.fillText('按 Enter 或点击按钮开始', VW/2, 522);
+  ctx.fillText(IS_TOUCH ? '点击「开始游戏」按钮进入' : '按 Enter 或点击按钮开始', VW/2, 522);
 }
 
 // 结束页
@@ -1016,7 +1115,7 @@ function drawEnd(){
   ctx.fillText('重新开始', VW/2, BTN_RESTART.y+27);
   ctx.font='13px "Microsoft YaHei",sans-serif';
   ctx.fillStyle='rgba(255,255,255,0.4)';
-  ctx.fillText('按 Enter / R 返回', VW/2, 462);
+  ctx.fillText(IS_TOUCH ? '点击「重新开始」按钮返回' : '按 Enter / R 返回', VW/2, 462);
 }
 
 function render(){
