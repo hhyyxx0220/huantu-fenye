@@ -5,13 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>幻途分野 - 虚实二界平台闯关</title>
 <style>
-  html,body{margin:0;padding:0;height:100%;background:#0b0a10;overflow:hidden;
-    display:flex;align-items:center;justify-content:center;}
-  canvas{width:min(100vw,177.78vh);height:min(56.25vw,100vh);
+  html,body{margin:0;padding:0;height:100%;background:#0b0a10;overflow:hidden;}
+  /* 舞台：横屏时铺满视口居中内容；竖屏手机时整体旋转 90° 强制横屏 */
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    pointer-events:none;}
+  canvas{pointer-events:auto;flex-shrink:0;
+    width:min(100vw,177.78vh);height:min(56.25vw,100vh);
     box-shadow:0 0 80px rgba(123,92,255,.18), 0 0 30px rgba(0,0,0,.6);
     outline:none;touch-action:none;}
   /* —— 触屏虚拟按键（仅触屏设备显示）—— */
-  #touchUI{display:none;position:fixed;inset:0;pointer-events:none;z-index:9;}
+  #touchUI{display:none;position:absolute;inset:0;pointer-events:none;z-index:9;}
   @media (hover:none) and (pointer:coarse){ #touchUI{display:block;} }
   .tb{position:absolute;pointer-events:auto;touch-action:none;
     user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;
@@ -27,14 +30,16 @@
   #bS{right:calc(28px + env(safe-area-inset-right));bottom:calc(110px + env(safe-area-inset-bottom));width:52px;height:52px;font-size:16px;}
   #bP{top:calc(10px + env(safe-area-inset-top));right:calc(12px + env(safe-area-inset-right));width:40px;height:40px;font-size:15px;border-radius:10px;}
   #bRst{top:calc(10px + env(safe-area-inset-top));right:calc(60px + env(safe-area-inset-right));width:40px;height:40px;font-size:15px;border-radius:10px;}
-  /* —— 竖屏提示 —— */
-  #rot{display:none;position:fixed;top:0;left:0;right:0;z-index:10;text-align:center;
-    padding:6px;font:13px/1.4 sans-serif;color:#9fd8ff;background:rgba(11,10,16,.78);}
-  @media (orientation:portrait) and (hover:none) and (pointer:coarse){ #rot{display:block;} }
+  /* —— 竖屏手机：舞台旋转 90°，游戏始终横屏显示（手机逆时针转 90° 握持即可）—— */
+  @media (orientation:portrait) and (hover:none) and (pointer:coarse){
+    #stage{width:100vh;height:100vw;width:100dvh;transform:rotate(90deg);}
+    canvas{width:min(100vh,177.78vw);height:min(56.25vh,100vw);
+      width:min(100dvh,177.78vw);height:min(56.25dvh,100vw);box-shadow:none;}
+  }
 </style>
 </head>
 <body>
-<div id="rot">建议横屏游玩，体验更佳</div>
+<div id="stage">
 <canvas id="game"></canvas>
 <div id="touchUI">
   <div class="tb" id="bL">◀</div>
@@ -44,6 +49,7 @@
   <div class="tb" id="bS">疾</div>
   <div class="tb" id="bP">⏸</div>
   <div class="tb" id="bRst">↺</div>
+</div>
 </div>
 <script>
 "use strict";
@@ -356,7 +362,14 @@ const down = list => list.some(k=>keys[k]);
 
 function canvasPos(e){
   const r = cvs.getBoundingClientRect();
-  return { x:(e.clientX-r.left)*VW/r.width, y:(e.clientY-r.top)*VH/r.height };
+  if(r.width >= r.height){                       // 正常横屏
+    return { x:(e.clientX-r.left)*VW/r.width, y:(e.clientY-r.top)*VH/r.height };
+  }
+  // 竖屏手机：舞台旋转了 90°，把屏幕坐标逆旋转回画布坐标
+  const cw = cvs.clientWidth, ch = cvs.clientHeight;   // 旋转前的 CSS 尺寸
+  const cx = e.clientX - (r.left + r.width/2);
+  const cy = e.clientY - (r.top + r.height/2);
+  return { x:(cy + cw/2)/cw*VW, y:(-cx + ch/2)/ch*VH };
 }
 cvs.addEventListener('mousemove', e=>{ mouse = canvasPos(e); updateCursor(); });
 cvs.addEventListener('click', e=>{
