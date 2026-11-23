@@ -13,8 +13,9 @@
     width:min(100vw,177.78vh);height:min(56.25vw,100vh);
     box-shadow:0 0 80px rgba(123,92,255,.18), 0 0 30px rgba(0,0,0,.6);
     outline:none;touch-action:none;}
-  /* —— 触屏虚拟按键（仅触屏设备显示）—— */
+  /* —— 触屏虚拟按键（JS 检测到触屏时加 body.touch，媒体查询做兜底）—— */
   #touchUI{display:none;position:absolute;inset:0;pointer-events:none;z-index:9;}
+  body.touch #touchUI{display:block;}
   @media (hover:none) and (pointer:coarse){ #touchUI{display:block;} }
   .tb{position:absolute;pointer-events:auto;touch-action:none;
     user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;
@@ -30,12 +31,7 @@
   #bS{right:calc(28px + env(safe-area-inset-right));bottom:calc(110px + env(safe-area-inset-bottom));width:52px;height:52px;font-size:16px;}
   #bP{top:calc(10px + env(safe-area-inset-top));right:calc(12px + env(safe-area-inset-right));width:40px;height:40px;font-size:15px;border-radius:10px;}
   #bRst{top:calc(10px + env(safe-area-inset-top));right:calc(60px + env(safe-area-inset-right));width:40px;height:40px;font-size:15px;border-radius:10px;}
-  /* —— 竖屏手机：舞台（铺满视口）绕屏幕中心旋转 90°，游戏始终横屏居中显示 —— */
-  @media (orientation:portrait) and (hover:none) and (pointer:coarse){
-    #stage{transform:rotate(90deg);}
-    canvas{width:min(100vh,177.78vw);height:min(56.25vh,100vw);
-      width:min(100dvh,177.78vw);height:min(56.25dvh,100vw);box-shadow:none;}
-  }
+  /* 竖屏手机的旋转与画布尺寸由 JS fitScreen() 动态计算（见脚本区），不依赖媒体查询 */
 </style>
 </head>
 <body>
@@ -304,12 +300,41 @@ function buildLevel(def){
 /* ============================ 四、输入系统 ============================ */
 const cvs = document.getElementById('game');
 const ctx = cvs.getContext('2d');
-// 超采样：桌面 4 倍（3840x2160）；触屏设备降为 2 倍（1920x1080）保证手机流畅
-const IS_TOUCH = matchMedia('(hover: none) and (pointer: coarse)').matches;
+const stage = document.getElementById('stage');
+// 触屏检测：触摸能力 + （粗指针 或 小屏），兼容 iOS/Android/折叠屏/触屏本
+const IS_TOUCH = (('ontouchstart' in window) || (navigator.maxTouchPoints||0) > 0)
+  && (matchMedia('(pointer: coarse)').matches || Math.min(screen.width,screen.height) <= 820);
+if(IS_TOUCH) document.body.classList.add('touch');
 const SS = IS_TOUCH ? 2 : 4;
 cvs.width = VW*SS; cvs.height = VH*SS;
 // 基础变换放大 SS 倍，之后所有绘制代码仍使用逻辑坐标 0~960 / 0~540，无需手动乘倍数
 ctx.setTransform(SS, 0, 0, SS, 0, 0);
+
+/* —— 屏幕自适应引擎：适配所有手机屏幕 ——
+ * 竖屏触屏：舞台绕屏幕中心旋转 90°（强制横屏），画布按旋转后的可视区最大化居中；
+ * 横屏/桌面：正常显示。监听 resize / orientationchange / visualViewport，
+ * 覆盖地址栏伸缩、刘海屏、折叠屏开合、异形屏等所有场景。 */
+function fitScreen(){
+  const vw = innerWidth, vh = innerHeight;
+  const portrait = vh > vw && IS_TOUCH;        // 触屏竖屏才旋转；桌面竖窗口不转
+  if(portrait){
+    stage.style.transform = 'rotate(90deg)';
+    cvs.style.boxShadow = 'none';
+  }else{
+    stage.style.transform = 'none';
+    cvs.style.boxShadow = '';
+  }
+  // 旋转后的可用区域：竖屏时宽高互换
+  const aw = portrait ? vh : vw, ah = portrait ? vw : vh;
+  let w = aw, hgt = aw*9/16;
+  if(hgt > ah){ hgt = ah; w = ah*16/9; }
+  cvs.style.width = w+'px';
+  cvs.style.height = hgt+'px';
+}
+addEventListener('resize', fitScreen);
+addEventListener('orientationchange', ()=>setTimeout(fitScreen, 150));
+if(window.visualViewport) visualViewport.addEventListener('resize', fitScreen);
+fitScreen();
 
 /* ============================ 图片美术资源 ============================ */
 // 加载 image/ 目录下的美术素材；任何一张加载失败都不影响游戏，
